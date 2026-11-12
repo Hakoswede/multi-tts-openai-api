@@ -1,48 +1,78 @@
-# BOTPORONGA
-No se, no tenia novia, me sentia muy solo así que me clave una paja en el monitor y así salió el bot.
+# Multi-TTS OpenAI-Compatible API
+
+Servidor HTTP en Node.js y Express que expone una API REST compatible con el estándar `/v1/audio/speech` de OpenAI, diseñado para integrarse en **Open WebUI** mediante **Docker**.
+
+Combina tres motores de síntesis de voz en un único endpoint con respaldo automático (**fallback**) hacia **Kokoro TTS**:
+- **Fish Audio (`s2.1-pro-free`):** 14 voces clonadas por IA (soporta `reference_id` y clonación zero-shot local mediante MessagePack).
+- **Loquendo Clásico (Oddcast Engine 2):** 11 voces clásicas en español con post-procesado de audio mediante `ffmpeg`.
+- **Edge TTS:** 8 voces internacionales en distintos idiomas.
+- **Fallback automático:** Si Fish Audio falla o alcanza el límite de cuota, redirige la petición automáticamente a una instancia local de Kokoro TTS.
 
 ---
 
-## Bot de Discord TTS (33 voces: IA + Loquendo + Internacionales)
+## Endpoints disponibles
 
-Bot de Discord en Node.js que se une a canales de voz y reproduce por **Text-To-Speech** mensajes manuales (`/say`, `!say`) o respuestas en vivo de bots configurados (`GENAI_BOT_ID`) resolviendo menciones (`@usuario`) e integrando **33 voces**:
+| Método | Ruta | Descripción |
+| :--- | :--- | :--- |
+| `POST` | `/v1/audio/speech` | Genera audio MP3 a partir de texto (`input`, `voice`, `model`). |
+| `GET` | `/v1/models` | Lista los motores/voces disponibles en formato compatible con OpenAI. |
+| `GET` | `/v1/audio/voices` | Devuelve el catálogo completo de voces y alias configurados. |
 
-- **14 voces IA clonadas (Fish Audio `s2.1-pro-free`):**
-  `bananero`, `arnold`, `latorre`, `peloconcha`, `peluca`, `narrador`, `joker`, `heman`, `momo`, `sonic`, `dross`, `alonso`, `optimus`, `babidi`
-- **11 voces Loquendo clásicas (GTA San Andreas):**
-  `jorge` (`cj`), `juan` (`ryder`), `carlos` (`tenpenny`), `carmen` (`catalina`), `diego` (`cesar` / `arg`), `esperanza`, `soledad`, `francisca`, `leonor`, `tio`, `loquendero`
-- **8 idiomas internacionales (Edge TTS):**
-  `ingles` (`en`), `japones` (`ja`), `portugues` (`pt`), `frances` (`fr`), `aleman` (`de`), `italiano` (`it`), `ruso` (`ru`), `coreano` (`ko`)
+### Ejemplo de petición
 
-## Comandos principales
+```bash
+curl -X POST http://localhost:5004/v1/audio/speech \
+  -H "Content-Type: application/json" \
+  -d '{"input": "Hola mundo, probando el servidor TTS.", "voice": "jorge"}' \
+  --output salida.mp3
+```
 
-Slash commands (con buscador/autocompletado dinámico en `/voz` y `/vozserver`):
-- `/join` / `!join` — Conecta el bot a tu canal de voz actual
-- `/leave` / `!leave` — Desconecta el bot del canal de voz
-- `/voz [personaje]` / `!voz <nombre>` — Cambia tu voz personal (soporta alias y nombres con espacios/acentos)
-- `/vozserver <personaje>` — Define la voz predeterminada del servidor y de GenAi
-- `/voces` / `!voces` — Lista las voces disponibles en Discord
-- `/say <texto>` / `!say <texto>` — Lee un texto en voz alta en el canal de voz
-- `/canal activar|desactivar|estado` (`!bind` / `!unbind`) — Configura lectura automática (Auto-TTS) en un canal
-- `/test` — Prueba rápida de audio con tu voz activa
-- `/help` / `!help` — Muestra la ayuda de comandos
+---
 
-## Configuración y ejecución
+## Catálogo de voces soportadas
 
-1. En tu .env hace esta garcha:
-   ```env
-   DISCORD_TOKEN=tu_token_de_discord
-   PREFIX=!
-   GENAI_BOT_ID=337518526030315520
-   DEFAULT_LANG=es
-   FISH_AUDIO_API_KEY=tu_api_key_de_fish_audio
-   ```
-2. Activá los **Privileged Gateway Intents** en Discord choto Portal
-3. Instalá dependencias y ejecutá el bot:
-   ```bash
-   npm install
-   npm start
-   ```
+* **IA (Fish Audio):** `bananero`, `arnold`, `latorre`, `peloconcha`, `peluca`, `narrador`, `joker`, `heman`, `momo`, `sonic`, `dross`, `alonso`, `optimus`, `babidi`.
+* **Loquendo:** `jorge` (`cj`), `juan` (`ryder`), `carlos` (`tenpenny`), `carmen` (`catalina`), `diego` (`cesar`), `esperanza`, `soledad`, `francisca`, `leonor`, `tio`, `loquendero`.
+* **Internacionales:** `ingles` (`en`), `japones` (`ja`), `portugues` (`pt`), `frances` (`fr`), `aleman` (`de`), `italiano` (`it`), `ruso` (`ru`), `coreano` (`ko`).
 
-Desplegalo en tu host mas feliz y pajeate con los pendejos crudos y un poco mas haces orgia.
+---
 
+## Variables de entorno
+
+| Variable | Requerida | Descripción |
+| :--- | :---: | :--- |
+| `PORT` | No | Puerto interno del servidor Express (por defecto `5000`). |
+| `FISH_AUDIO_API_KEY` | Sí* | Clave de API de Fish Audio (*si se omite, deriva a Kokoro). |
+| `KOKORO_API_URL` | No | URL del endpoint de respaldo (por defecto `http://kokoro-api:5000/v1/audio/speech`). |
+| `DEFAULT_VOICE` | No | Voz predeterminada si no se especifica una en la petición (`jorge`). |
+
+---
+
+## Despliegue con Docker Compose
+
+```yaml
+services:
+  fishaudio-tts:
+    build: ./fishaudio-tts
+    container_name: fishaudio_tts
+    restart: unless-stopped
+    ports:
+      - "5004:5000"
+    environment:
+      - FISH_AUDIO_API_KEY=${FISH_AUDIO_API_KEY}
+      - KOKORO_API_URL=http://kokoro-api:5000/v1/audio/speech
+```
+
+### Configuración en Open WebUI
+
+En **Admin Panel → Settings → Audio**:
+* **Text-to-Speech Engine:** `OpenAI`
+* **API Base URL:** `http://fishaudio-tts:5000/v1`
+* **API Key:** `dummy-key`
+* **TTS Voice:** `jorge` (o cualquier alias del catálogo)
+
+---
+
+## Créditos
+
+Adaptado y contenedorizado a partir del proyecto original de [Vik2k15/BOTPORONGA](https://github.com/Vik2k15/BOTPORONGA).
