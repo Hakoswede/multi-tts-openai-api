@@ -1,47 +1,11 @@
-const {
-  createAudioPlayer,
-  createAudioResource,
-  AudioPlayerStatus,
-  NoSubscriberBehavior,
-  StreamType,
-} = require('@discordjs/voice');
 const { MsEdgeTTS, OUTPUT_FORMAT } = require('msedge-tts');
-const googleTTS = require('google-tts-api');
 const crypto = require('crypto');
 const fs = require('fs');
 const path = require('path');
 const https = require('https');
-const { Readable } = require('stream');
 const { spawn, execSync } = require('child_process');
 
 let ffmpegPath = null;
-
-// Archivo persistente para guardar preferencias de voz de usuarios y canales TTS
-const SETTINGS_FILE = path.join(__dirname, 'settings.json');
-
-function loadSettings() {
-  try {
-    if (fs.existsSync(SETTINGS_FILE)) {
-      const parsed = JSON.parse(fs.readFileSync(SETTINGS_FILE, 'utf8'));
-      return {
-        userVoices: parsed.userVoices || {},
-        serverVoices: parsed.serverVoices || {},
-        ttsChannels: parsed.ttsChannels || {},
-      };
-    }
-  } catch (err) {
-    console.warn('[SETTINGS] Aviso leyendo settings.json:', err.message);
-  }
-  return { userVoices: {}, serverVoices: {}, ttsChannels: {} };
-}
-
-function saveSettings(data) {
-  try {
-    fs.writeFileSync(SETTINGS_FILE, JSON.stringify(data, null, 2), 'utf8');
-  } catch (err) {
-    console.error('[SETTINGS] Error guardando settings.json:', err.message);
-  }
-}
 
 // Resolver o garantizar la presencia de ffmpeg (compatible con Windows y contenedores Linux)
 function resolveFfmpeg() {
@@ -555,11 +519,6 @@ function encodeMsgpack(val) {
 
 class TTSManager {
   constructor() {
-    this.players = new Map(); // guildId -> { player, queue: [], isPlaying: false, connection }
-    this.settings = loadSettings();
-    this.userVoices = new Map(Object.entries(this.settings.userVoices || {}));
-    this.serverVoices = new Map(Object.entries(this.settings.serverVoices || {}));
-    this.ttsChannels = new Map(Object.entries(this.settings.ttsChannels || {}));
     this.referenceAudioCache = new Map();
   }
 
@@ -568,13 +527,6 @@ class TTSManager {
       this.referenceAudioCache.set(filePath, fs.readFileSync(filePath));
     }
     return this.referenceAudioCache.get(filePath);
-  }
-
-  save() {
-    this.settings.userVoices = Object.fromEntries(this.userVoices);
-    this.settings.serverVoices = Object.fromEntries(this.serverVoices);
-    this.settings.ttsChannels = Object.fromEntries(this.ttsChannels);
-    saveSettings(this.settings);
   }
 
   resolveVoiceKey(key) {
@@ -589,57 +541,6 @@ class TTSManager {
     return ALL_VOICES[resolved] ? resolved : null;
   }
 
-  // Configuración de voz personal por usuario
-  setUserVoice(userId, key) {
-    const resolved = this.resolveVoiceKey(key);
-    if (resolved) {
-      this.userVoices.set(userId, resolved);
-      this.save();
-      return { ...ALL_VOICES[resolved], key: resolved };
-    }
-    return null;
-  }
-
-  getUserVoice(userId, guildId = null) {
-    const userKey = this.userVoices.get(userId);
-    if (userKey && ALL_VOICES[userKey]) {
-      return { ...ALL_VOICES[userKey], key: userKey };
-    }
-    return this.getServerVoice(guildId);
-  }
-
-  // Configuración de voz predeterminada del servidor
-  setServerVoice(guildId, key) {
-    const resolved = this.resolveVoiceKey(key);
-    if (resolved) {
-      this.serverVoices.set(guildId, resolved);
-      this.save();
-      return { ...ALL_VOICES[resolved], key: resolved };
-    }
-    return null;
-  }
-
-  getServerVoice(guildId) {
-    const serverKey = (guildId && this.serverVoices.get(guildId)) || process.env.DEFAULT_VOICE || 'jorge';
-    const key = ALL_VOICES[serverKey] ? serverKey : 'jorge';
-    return { ...ALL_VOICES[key], key };
-  }
-
-  // Configuración de canal TTS automático
-  setTtsChannel(guildId, channelId) {
-    this.ttsChannels.set(guildId, channelId);
-    this.save();
-  }
-
-  removeTtsChannel(guildId) {
-    this.ttsChannels.delete(guildId);
-    this.save();
-  }
-
-  getTtsChannel(guildId) {
-    return this.ttsChannels.get(guildId) || null;
-  }
-
   cleanText(text) {
     let cleaned = text
       .replace(/<a?:\w+:\d+>/g, '') // Emojis de Discord
@@ -649,11 +550,6 @@ class TTSManager {
       .replace(/[\r\n]+/g, ' ') // Saltos de línea
       .replace(/\s+/g, ' ') // Espacios dobles
       .trim();
-
-    // Limitar longitud para evitar saturación de audio
-    if (cleaned.length > 300) {
-      cleaned = cleaned.slice(0, 300) + '...';
-    }
     return cleaned;
   }
 
@@ -810,207 +706,6 @@ class TTSManager {
         resolve(inputBuffer);
       }
     });
-  }
-
-  playAudioBuffer(guildId, state, audioBuffer) {
-    if (!this.players.has(guildId)) return;
-    if (!audioBuffer || audioBuffer.length < 256) {
-      throw new Error('Buffer de audio inválido');
-    }
-
-    const stream = Readable.from(audioBuffer);
-    const resource = createAudioResource(stream, {
-      inputType: StreamType.Arbitrary,
-      silencePaddingFrames: 25, // 500ms de silencio final para que Discord nunca recorte la última sílaba
-    });
-
-    if (state.connection) {
-      state.connection.subscribe(state.player);
-    }
-    state.player.play(resource);
-  }
-
-  getQueue(guildId, connection) {
-    if (!this.players.has(guildId)) {
-      const player = createAudioPlayer({
-        behaviors: {
-          noSubscriber: NoSubscriberBehavior.Play,
-          maxMissedFrames: 150, // Tolerancia de 3 segundos ante micro-cortes de CPU/red en contenedor
-        },
-      });
-      connection.subscribe(player);
-
-      const state = {
-        player,
-        queue: [],
-        isPlaying: false,
-        cooldownTimer: null,
-        connection,
-      };
-
-      // Manejo de fin de audio con COOLDOWN natural entre mensajes de la cola (800ms)
-      player.on(AudioPlayerStatus.Idle, (oldState) => {
-        if (oldState.status === AudioPlayerStatus.Idle) return;
-        state.isPlaying = false;
-        if (state.cooldownTimer) clearTimeout(state.cooldownTimer);
-        state.cooldownTimer = setTimeout(() => {
-          state.cooldownTimer = null;
-          this.playNext(guildId);
-        }, 800);
-      });
-
-      player.on('error', (err) => {
-        console.error(`[TTS PLAYER ERROR] [Guild ${guildId}]:`, err.message);
-        state.isPlaying = false;
-        if (state.cooldownTimer) clearTimeout(state.cooldownTimer);
-        state.cooldownTimer = setTimeout(() => {
-          state.cooldownTimer = null;
-          this.playNext(guildId);
-        }, 500);
-      });
-
-      this.players.set(guildId, state);
-    } else {
-      const state = this.players.get(guildId);
-      if (connection && state.connection !== connection) {
-        state.connection = connection;
-        connection.subscribe(state.player);
-      }
-    }
-    return this.players.get(guildId);
-  }
-
-  async enqueue(guildId, connection, text, customVoiceKey = null, authorId = null) {
-    const cleaned = this.cleanText(text);
-    if (!cleaned) return { success: false, reason: 'empty' };
-
-    const state = this.getQueue(guildId, connection);
-
-    const voiceKey = customVoiceKey
-      ? (this.resolveVoiceKey(customVoiceKey) || 'jorge')
-      : (authorId ? this.getUserVoice(authorId, guildId).key : this.getServerVoice(guildId).key);
-
-    const voiceConfig = ALL_VOICES[voiceKey] || ALL_VOICES.jorge;
-
-    const queueItem = {
-      text: cleaned,
-      voiceConfig,
-      authorId,
-      enqueuedAt: Date.now(),
-    };
-
-    state.queue.push(queueItem);
-
-    if (!state.isPlaying) {
-      this.playNext(guildId);
-      return { success: true, queued: false, queuePosition: 0 };
-    }
-
-    return { success: true, queued: true, queuePosition: state.queue.length };
-  }
-
-  async playNext(guildId) {
-    const state = this.players.get(guildId);
-    if (!state) return;
-
-    if (state.cooldownTimer) {
-      clearTimeout(state.cooldownTimer);
-      state.cooldownTimer = null;
-    }
-
-    if (state.queue.length === 0) {
-      state.isPlaying = false;
-      return;
-    }
-
-    state.isPlaying = true;
-    const { text, voiceConfig } = state.queue.shift();
-
-    try {
-      let audioBuffer = null;
-
-      if (voiceConfig.type === 'loquendo') {
-        // --- 1. MOTOR REAL LOQUENDO (Oddcast Engine 2) ---
-        const loquendoUrl = this.getLoquendoUrl(text, voiceConfig);
-        audioBuffer = await this.fetchGetBuffer(loquendoUrl);
-
-        if (voiceConfig.filter) {
-          audioBuffer = await this.applyAudioFilter(audioBuffer, voiceConfig.filter);
-        }
-      } else if (voiceConfig.type === 'fish_audio') {
-        // --- 2. VOCES CLONADAS POR IA (Fish Audio API - Buffer Completo) ---
-        const apiKey = process.env.FISH_AUDIO_API_KEY;
-        if (!apiKey) {
-          console.warn('[FISH AUDIO] No se configuró FISH_AUDIO_API_KEY en .env. Usando Google TTS como respaldo...');
-          return await this.fallbackGoogle(guildId, state, text, voiceConfig);
-        }
-
-        audioBuffer = await this.fetchFishAudioBuffer(text, voiceConfig, apiKey);
-      } else {
-        // --- 3. VOCES INTERNACIONALES (MsEdgeTTS) ---
-        const edge = new MsEdgeTTS();
-        await edge.setMetadata(voiceConfig.voice, OUTPUT_FORMAT.AUDIO_24KHZ_96KBITRATE_MONO_MP3);
-        const { audioStream } = edge.toStream(text);
-        audioBuffer = await this.streamToBuffer(audioStream);
-      }
-
-      this.playAudioBuffer(guildId, state, audioBuffer);
-    } catch (primaryErr) {
-      console.warn(`[TTS] Error en motor principal (${primaryErr.message}), usando respaldo Google TTS...`);
-      await this.fallbackGoogle(guildId, state, text, voiceConfig);
-    }
-  }
-
-  async fallbackGoogle(guildId, state, text, voiceConfig) {
-    try {
-      const langCode = (voiceConfig.type === 'loquendo' || voiceConfig.type === 'fish_audio')
-        ? 'es'
-        : (voiceConfig.voice?.split('-')[0] || 'es');
-      const safeText = text.length > 190 ? text.slice(0, 190) : text;
-      const url = googleTTS.getAudioUrl(safeText, {
-        lang: langCode,
-        slow: false,
-        host: 'https://translate.google.com',
-        timeout: 10000,
-      });
-
-      const audioBuffer = await this.fetchGetBuffer(url, 12000);
-      this.playAudioBuffer(guildId, state, audioBuffer);
-    } catch (backupErr) {
-      console.error('[TTS FATAL] Fallaron todos los motores de audio:', backupErr.message);
-      state.isPlaying = false;
-      if (state.cooldownTimer) clearTimeout(state.cooldownTimer);
-      state.cooldownTimer = setTimeout(() => {
-        state.cooldownTimer = null;
-        this.playNext(guildId);
-      }, 500);
-    }
-  }
-
-  clearQueue(guildId) {
-    const state = this.players.get(guildId);
-    if (state) {
-      if (state.cooldownTimer) {
-        clearTimeout(state.cooldownTimer);
-        state.cooldownTimer = null;
-      }
-      state.queue = [];
-      state.player.stop();
-      state.isPlaying = false;
-    }
-  }
-
-  destroy(guildId) {
-    const state = this.players.get(guildId);
-    if (state) {
-      if (state.cooldownTimer) {
-        clearTimeout(state.cooldownTimer);
-        state.cooldownTimer = null;
-      }
-      state.queue = [];
-      state.player.stop();
-      this.players.delete(guildId);
-    }
   }
 
   getVoicesList() {

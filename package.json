@@ -4,8 +4,7 @@
   "description": "",
   "main": "index.js",
   "scripts": {
-    "start": "node download_ffmpeg.js && node index.js",
-    "postinstall": "node download_ffmpeg.js",
+    "start": "node index.js",
     "test": "echo \"Error: no test specified\" && exit 1"
   },
   "keywords": [],
@@ -16,15 +15,12 @@
     "node": ">=20.0.0"
   },
   "allowScripts": {
-    "ffmpeg-static": true,
     "msedge-tts": true
   },
   "dependencies": {
-    "@discordjs/voice": "^0.19.2",
-    "discord.js": "^14.28.1",
     "dotenv": "^18.0.9",
+    "express": "^4.18.2",
     "ffmpeg-static": "^5.3.0",
-    "google-tts-api": "^2.0.2",
     "libsodium-wrappers": "^0.8.4",
     "msedge-tts": "^2.1.1",
     "opusscript": "^0.0.8"
