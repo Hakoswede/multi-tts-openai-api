@@ -69,11 +69,16 @@ async function fetchKokoroBuffer(text, voice = 'ef_dora') {
 
 app.post('/v1/audio/speech', async (req, res) => {
   try {
-    const text = req.body.input;
+    const rawText = req.body.input;
     const requestedVoice = req.body.voice || req.body.model || 'jorge';
 
-    if (!text) {
+    if (!rawText) {
       return res.status(400).json({ error: 'Falta el campo input' });
+    }
+
+    const text = tts.cleanText(rawText);
+    if (!text) {
+      return res.status(400).json({ error: 'El campo input quedó vacío tras limpiar el texto' });
     }
 
     const voiceKey = tts.resolveVoiceKey(requestedVoice) || 'jorge';
